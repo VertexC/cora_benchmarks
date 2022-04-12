@@ -20,6 +20,7 @@ dataset_files = {
     "cola": "/glue_data/CoLA/train_lengths.txt",
     "xnli": "/glue_data/XNLI/train_lengths.txt",
     "race": "/race/train_lengths.txt",
+    "simple": "/simple/train_lengths.txt"
 }
 
 dataset_max_lens = {
@@ -31,6 +32,7 @@ dataset_max_lens = {
     "xnli" : 128,
     "mrpc" : 112,
     "cola" : 48,
+    "simple": 128,
 }
 
 DATASETS = list(dataset_max_lens.keys())
@@ -318,9 +320,9 @@ def get_bert_layer_run_fn(bs_var):
 
             batches = get_nlp_batches(batch_size, num_batches, args.dataset)
             batches = [sorted(batch, reverse=True) for batch in batches]
-            if pad_sum: batches = append_padded_sum(batches, pad_sum)
-
+            # if pad_sum: batches = append_padded_sum(batches, pad_sum)
             time = 0
+            import pdb; pdb.set_trace()
             for batch in batches:
                 t_inputs = ([batch_size] +
                             [create_tvm_array(i, "float32", ctx, rmap=rmap, lw_args=lw_args([batch]))
