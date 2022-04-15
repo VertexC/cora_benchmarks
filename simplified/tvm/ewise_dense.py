@@ -43,24 +43,7 @@ O = te.ragged_compute((M, N), [bd, ld], loop_ufs, lambda ds: A[ds[bd], ds[ld]] *
     name="O", width_uf_lists=[width_ufs])
 
 
-# xo, xi = s[O].leaf_iter_vars
-
 s = te.create_schedule([O.op])
-
-# ##### space definition begin #####
-# cfg = autotvm.get_config()
-
-# x, y = s[O].op.axis
-
-# cfg = autotvm.get_config()
-# cfg.define_split("tile_x", x, num_outputs=2)
-# cfg.define_split("tile_y", y, num_outputs=2)
-    
-# # schedule according to config
-# yo, yi = cfg["tile_y"].apply(s, O, y)
-# xo, xi = cfg["tile_x"].apply(s, O, x)
-
-# s[O].reorder(yo, xo, yi, xi)
 
 prep_code_mode = "no_prep_code"
 build_inputs = [[], [A, O]]
