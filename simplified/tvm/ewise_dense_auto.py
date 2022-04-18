@@ -28,6 +28,7 @@ N, M = 1024, 1024
 
 @autotvm.template
 def ewiseMul(M, N):
+     
     A = te.placeholder((M, N), name="A")
 
 
@@ -64,8 +65,58 @@ def ewiseMul(M, N):
 
     s[O].reorder(yo, xo, yi, xi)
 
-    return s, [A, O]
+    return s, [[], [A, O]]
 
 
 task = autotvm.task.create(ewiseMul, args=(N, M), target='llvm')
-print(task.config_space)
+
+logging.getLogger('autotvm').setLevel(logging.DEBUG)
+logging.getLogger('autotvm').addHandler(logging.StreamHandler(sys.stdout))
+
+
+
+def exec_func(target, fadd, i_bufs, args):
+     
+    host_i_inputs = []
+    dev_i_inputs = []
+    ctx = tvm.cpu(0)
+    t_inputs = [run_utils.create_tvm_array(i, "float32", ctx, rmap={}, lw_args={}) for i in args[1]]
+    
+    l_inputs = []
+    inputs = t_inputs + l_inputs + host_i_inputs + dev_i_inputs
+    time = run_utils.execute(target, fadd, inputs, ctx, False)
+    return [time]
+
+# There are two steps for measuring a config: build and run.
+# By default, we use all CPU cores to compile program. Then measure them sequentially.
+# We measure 5 times and take average to reduce variance.
+measure_option = autotvm.measure_option(
+    builder='local',
+    runner=autotvm.LocalRunner(number=5, exec_func=exec_func))
+
+
+# Begin tuning with RandomTuner, log records to file `matmul.log`
+# You can use alternatives like XGBTuner.
+
+tuner_method = "random"
+# tuner = autotvm.tuner.RandomTuner(task)
+tuner = autotvm.tuner.RandomTuner(task)
+
+log_file = 'ewise_dense_auto_{}.log'.format(tuner_method)
+tuner.tune(n_trial=3,
+           measure_option=measure_option,
+           callbacks=[autotvm.callback.log_to_file(log_file)])
+
+# apply history best from log file
+with autotvm.apply_history_best(log_file):
+    with tvm.target.create('llvm'):
+        s, arg_bufs = ewiseMul(N, M)
+        with tvm.build_config(prep_code_mode="no_prep_code",
+                          fill_in_function_bodies=True,
+                          hoist_loads=False,
+                          disable_assert=False):
+            func, i_bufs = tvm.build(s, arg_bufs, target, binds=None, substitutes=None)
+
+
+time = exec_func(target, func, i_bufs, arg_bufs)
+print("final time:", time)
