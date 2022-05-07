@@ -36,7 +36,7 @@ lufw32 = len_ufw('s64', 64)
 def gemm():
 
     ls =  {
-     0: Uf.from_constant('bd', BATCH_SIZE, 'l'),
+        0: Uf.from_constant('bd', BATCH_SIZE, 'l'),
         1: lufw1.get_uf(),
         2: Uf.from_constant('ed', E_SIZE, 'l'),
         3: Uf.from_constant('vd', V_SIZE, 'l'),
@@ -59,11 +59,7 @@ def gemm():
                     axis=rds['k'], dimensions = [ed]),
                 name = 'O', reduce_axis_ufs = [('k', ls[2])], width_uf_lists=[width_ufs_o])
 
-
-
     s = tvm.create_schedule([O.op])
-
-    Os = s.cache_write(O, 'local')
 
     inputs = [[lens], [A, B, O]]
 
@@ -74,33 +70,33 @@ def gemm():
 
     # Blocking by loop tiling
     x, y, z = s[O].op.axis
+    k = s[O].op.reduce_axis[0]
 
     cfg.define_split("tile_y", y, num_outputs=2)
     cfg.define_split("tile_z", z, num_outputs=2)
 
     yo, yi = cfg["tile_y"].apply(s, O, y)
     zo, zi = cfg["tile_z"].apply(s, O, z)
-    # import pdb; pdb.set_trace()
+
+    # cfg.define_split("tile_k", k, num_outputs=2)
+    # ko, ki = cfg["tile_z"].apply(s, O, k)
+
     # Hoist reduction domain outside the blocking loop
-    # k = s[O].op.reduce_axis[0]
-    s[O].reorder(x, yo, zo, yi, zi)
+    s[O].reorder(x, yo, zo, k, yi, zi)
 
-    yz =  s[O].fuse(yo, zo)
-    xyz = s[O].fuse(x, yz)
-    
-    s[O].parallel(xyz)
+    thread_x = tvm.thread_axis("threadIdx.x")
+    thread_y = tvm.thread_axis("threadIdx.y")
+    block_x = tvm.thread_axis("blockIdx.x")
+    block_y = tvm.thread_axis("blockIdx.y")
 
-    s[Os].compute_at(s[O], xyz)
-    b, xc, yc = s[Os].op.axis
+    f1 = s[O].fuse(yo, zo)
+    f2 = s[O].fuse(x, f1)
+    s[O].bind(f2, block_x)
+    s[O].bind(k, block_y)
 
-    k = Os.op.reduce_axis[0]
-
-    cfg.define_split("tile_k", k, num_outputs=2)
-    ko, ki = cfg["tile_z"].apply(s, Os, k)
-
-    s[Os].reorder(ko, xc, ki, yc)
-    s[Os].unroll(ki)
-    s[Os].vectorize(yc)
+    # f3 = s[O].fuse(yi, ki)
+    s[O].bind(yi, thread_x)
+    s[O].bind(zi, thread_y)
 
 
     def size_fn(l_inputs):
