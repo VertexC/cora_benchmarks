@@ -61,6 +61,6 @@ with tvm.build_config(prep_code_mode=prep_code_mode,
     
     l_inputs = []
     inputs = t_inputs + l_inputs + host_i_inputs + dev_i_inputs
-    import pdb; pdb.set_trace()
+     
     time = run_utils.execute(target, fadd, inputs, ctx, False)
     print(time)

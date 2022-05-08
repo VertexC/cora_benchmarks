@@ -93,7 +93,7 @@ measure_option = autotvm.measure_option(
 # Begin tuning, log records to file `conv2d.log`
 # During tuning we will also try many invalid configs, so you are expected to
 # see many error reports. As long as you can see non-zero GFLOPS, it is okay.
-import pdb; pdb.set_trace()
+ 
 tuner = autotvm.tuner.XGBTuner(task)
 tuner.tune(
     n_trial=20,

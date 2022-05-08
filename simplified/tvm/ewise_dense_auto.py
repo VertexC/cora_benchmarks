@@ -51,8 +51,6 @@ def ewiseMul(M, N):
     s = te.create_schedule([O.op])
 
     ##### space definition begin #####
-    cfg = autotvm.get_config()
-
     x, y = s[O].op.axis
 
     cfg = autotvm.get_config()
@@ -65,7 +63,7 @@ def ewiseMul(M, N):
 
     s[O].reorder(yo, xo, yi, xi)
 
-    return s, [[], [A, O]]
+    return s, [[], [A, O]], None
 
 
 task = autotvm.task.create(ewiseMul, args=(N, M), target='llvm')
@@ -75,7 +73,7 @@ logging.getLogger('autotvm').addHandler(logging.StreamHandler(sys.stdout))
 
 
 
-def exec_func(target, fadd, i_bufs, args):
+def exec_func(target, fadd, i_bufs, args, size_fn):
      
     host_i_inputs = []
     dev_i_inputs = []
@@ -90,17 +88,26 @@ def exec_func(target, fadd, i_bufs, args):
 # There are two steps for measuring a config: build and run.
 # By default, we use all CPU cores to compile program. Then measure them sequentially.
 # We measure 5 times and take average to reduce variance.
+build_option = {
+                'prep_code_mode':'no_prep_code',
+                'fill_in_function_bodies': True,
+                'hoist_loads': False,
+                'disable_assert': False,
+            }
 measure_option = autotvm.measure_option(
-    builder='local',
-    runner=autotvm.LocalRunner(number=5, exec_func=exec_func))
+    builder=autotvm.LocalBuilder(),
+    runner=autotvm.LocalRunner(build_option=build_option, number=5, exec_func=exec_func))
 
 
 # Begin tuning with RandomTuner, log records to file `matmul.log`
 # You can use alternatives like XGBTuner.
 
 tuner_method = "random"
-# tuner = autotvm.tuner.RandomTuner(task)
-tuner = autotvm.tuner.RandomTuner(task)
+if tuner_method == "random":
+    tuner = autotvm.tuner.RandomTuner(task)
+elif tuner_method == "xg":
+    tuner = autotvm.tuner.XGBTuner(task)
+
 
 log_file = 'ewise_dense_auto_{}.log'.format(tuner_method)
 tuner.tune(n_trial=3,

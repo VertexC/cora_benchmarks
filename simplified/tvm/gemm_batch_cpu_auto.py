@@ -15,8 +15,8 @@ parser = run_utils.get_cmd_parser()
 args = parser.parse_args()
 
 BATCH_SIZE = 32
-E_SIZE = 2
-V_SIZE = 2
+E_SIZE = 32
+V_SIZE = 32
 MAX_LEN = run_utils.get_maxlen_padded(args.dataset)
 print("get MAX_LEN:", MAX_LEN)
 lens = te.placeholder((BATCH_SIZE,), name = 'lens', dtype = 'int32')
@@ -46,26 +46,24 @@ def gemm():
     loop_ufs_a=[ls[0], ls[1], ls[2]]
     width_ufs_a=[ls[0], ls[4], ls[2]]
 
-    loop_ufs_b=[ls[2], ls[3]]
-    width_ufs_b=[ls[2], ls[3]]
+    loop_ufs_b=[ls[0], ls[2], ls[3]]
+    width_ufs_b=[ls[0], ls[2], ls[3]]
     A = te.ragged_placeholder((BATCH_SIZE, MAX_LEN, E_SIZE), [bd, ld, ed], loop_ufs_a, name='A', width_ufs=width_ufs_a)
-    B = te.ragged_placeholder((E_SIZE, V_SIZE), [ed, vd], loop_ufs_b, name='B', width_ufs=width_ufs_b)
+    B = te.ragged_placeholder((BATCH_SIZE, E_SIZE, V_SIZE), [bd, ed, vd], loop_ufs_b, name='B', width_ufs=width_ufs_b)
 
     loop_ufs_o=[ls[0], ls[1], ls[3]]
     width_ufs_o=[ls[0], ls[4], ls[3]]
 
-    O = te.ragged_compute((BATCH_SIZE, MAX_LEN, V_SIZE), [bd, ld, vd], loop_ufs_o,
-                lambda ds, rds: tvm.sum(A[ds[bd], ds[ld], rds['k']] * B[rds['k'], ds[vd]], 
+    C = te.ragged_compute((BATCH_SIZE, MAX_LEN, V_SIZE), [bd, ld, vd], loop_ufs_o,
+                lambda ds, rds: tvm.sum(A[ds[bd], ds[ld], rds['k']] * B[ds[bd], rds['k'], ds[vd]], 
                     axis=rds['k'], dimensions = [ed]),
-                name = 'O', reduce_axis_ufs = [('k', ls[2])], width_uf_lists=[width_ufs_o])
+                name = 'C', reduce_axis_ufs = [('k', ls[2])], width_uf_lists=[width_ufs_o])
 
+    s = tvm.create_schedule([C.op])
 
+    CachedC = s.cache_write(C, 'local')
 
-    s = tvm.create_schedule([O.op])
-
-    Os = s.cache_write(O, 'local')
-
-    inputs = [[lens], [A, B, O]]
+    inputs = [[lens], [A, B, C]]
 
 
     ##### space definition begin #####
@@ -73,34 +71,32 @@ def gemm():
 
 
     # Blocking by loop tiling
-    x, y, z = s[O].op.axis
+    b, x, y = s[C].op.axis
 
+    cfg.define_split("tile_x", x, num_outputs=2)
     cfg.define_split("tile_y", y, num_outputs=2)
-    cfg.define_split("tile_z", z, num_outputs=2)
 
-    yo, yi = cfg["tile_y"].apply(s, O, y)
-    zo, zi = cfg["tile_z"].apply(s, O, z)
-    # import pdb; pdb.set_trace()
-    # Hoist reduction domain outside the blocking loop
-    # k = s[O].op.reduce_axis[0]
-    s[O].reorder(x, yo, zo, yi, zi)
+    xo, xi = cfg["tile_x"].apply(s, C, x)
+    yo, yi = cfg["tile_y"].apply(s, C, y)
 
-    yz =  s[O].fuse(yo, zo)
-    xyz = s[O].fuse(x, yz)
+    s[C].reorder(b, xo, yo, xi, yi)
+
+    xy =  s[C].fuse(xo, yo)
+    bxy = s[C].fuse(b, xy)
     
-    s[O].parallel(xyz)
+    s[C].parallel(bxy)
 
-    s[Os].compute_at(s[O], xyz)
-    b, xc, yc = s[Os].op.axis
+    s[CachedC].compute_at(s[C], bxy)
+    b, xc, yc = s[CachedC].op.axis
 
-    k = Os.op.reduce_axis[0]
+    k = CachedC.op.reduce_axis[0]
 
     cfg.define_split("tile_k", k, num_outputs=2)
-    ko, ki = cfg["tile_z"].apply(s, Os, k)
+    ko, ki = cfg["tile_k"].apply(s, CachedC, k)
 
-    s[Os].reorder(ko, xc, ki, yc)
-    s[Os].unroll(ki)
-    s[Os].vectorize(yc)
+    s[CachedC].reorder(ko, xc, ki, yc)
+    s[CachedC].unroll(ki)
+    s[CachedC].vectorize(yc)
 
 
     def size_fn(l_inputs):
@@ -108,7 +104,7 @@ def gemm():
         fn = lufw32.get_fn(lens)
         return {
             A: run_utils.prefix_sum(len(lens), lambda b: (fn(b)*E_SIZE)),
-            O: run_utils.prefix_sum(len(lens), lambda b: (fn(b)*V_SIZE))
+            C: run_utils.prefix_sum(len(lens), lambda b: (fn(b)*V_SIZE))
         }
     return s, inputs, size_fn
 
@@ -118,23 +114,40 @@ def exec_func(target, fadd, i_bufs, t_bufs, size_fn):
     avg_time = run_function(fadd, i_bufs, t_bufs[1], size_fn, args, pad_sum=None)
     return [avg_time]
 
+log_file = args.log_file
+if args.log_file == "":
+    task = autotvm.task.create(gemm, args=(), target=args.target)
 
-task = autotvm.task.create(gemm, args=(), target=args.target)
+    build_option = {
+                    'prep_code_mode':'with_prep_code',
+                    'fill_in_function_bodies': True,
+                    'hoist_loads': False,
+                    'disable_assert': False,
+                }
 
-build_option = {
-                'prep_code_mode':'with_prep_code',
-                'fill_in_function_bodies': True,
-                'hoist_loads': False,
-                'disable_assert': False,
-            }
+    measure_option = autotvm.measure_option(
+        builder=autotvm.LocalBuilder(),
+        runner=autotvm.LocalRunner(build_option=build_option, number=1, exec_func=exec_func))
 
-measure_option = autotvm.measure_option(
-    builder=autotvm.LocalBuilder(),
-    runner=autotvm.LocalRunner(build_option=build_option, number=5, exec_func=exec_func))
+    log_file = 'gemm_cpu_auto_{}.log'.format(args.dataset)
+    tuner = autotvm.tuner.XGBTuner(task)
+    tuner.tune(n_trial=30,
+            measure_option=measure_option,
+            callbacks=[autotvm.callback.log_to_file(log_file)])
 
-tuner_method = "random"
-log_file = 'gemm_auto_{}.log'.format(tuner_method)
-tuner = autotvm.tuner.RandomTuner(task)
-tuner.tune(n_trial=10,
-           measure_option=measure_option,
-           callbacks=[autotvm.callback.log_to_file(log_file)])
+
+# apply history best from log file
+with autotvm.apply_history_best(log_file):
+    with tvm.target.create('llvm'):
+        s, arg_bufs, size_fn = gemm()
+        with tvm.build_config(prep_code_mode="with_prep_code",
+                        fill_in_function_bodies=True,
+                        hoist_loads=False,
+                        disable_assert=False):
+            func, i_bufs = tvm.build(s, arg_bufs, args.target, binds=None, substitutes=None)
+
+time = exec_func(args.target, func, i_bufs, arg_bufs, size_fn)
+print("final time:", time)
+
+
+
